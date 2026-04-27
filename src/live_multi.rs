@@ -7,12 +7,16 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::io;
 
+use bytes::Bytes;
 use egui::{Response, Ui};
-use elegance::MultiTerminal;
+use elegance::{MultiTerminal, TerminalEvent, TerminalLine, TerminalPane};
 
 use crate::ansi::AnsiHandler;
-use crate::backend::BackendHandle;
+use crate::backend::{
+    spawn_backend, BackendEvent, BackendHandle, CloseReason, TerminalBackend, TerminalStatus,
+};
 
 /// Policy for what to drop when a pane's output ring buffer fills.
 ///
@@ -28,7 +32,6 @@ pub enum OverflowPolicy {
     DropOldest,
 }
 
-#[allow(dead_code)]
 struct Pane {
     backend: BackendHandle,
     ansi: AnsiHandler,
@@ -37,7 +40,7 @@ struct Pane {
 /// Multi-pane terminal widget driven by real backends.
 ///
 /// See `terminal_crate_plan.md` §4.
-#[allow(dead_code)] // `panes` and `overflow` are wired up in M1.
+#[allow(dead_code)] // `overflow` is wired up in the spawn-loop hardening pass.
 pub struct LiveMultiTerminal {
     inner: MultiTerminal,
     panes: HashMap<String, Pane>,
@@ -58,14 +61,35 @@ impl LiveMultiTerminal {
         self
     }
 
+    /// Add a pane with any [`TerminalBackend`] implementation. The backend
+    /// is spawned on the singleton runtime; the returned [`BackendHandle`]
+    /// is owned by the widget and drained per-frame via [`Self::pump`].
+    pub fn add_pane<B: TerminalBackend>(
+        &mut self,
+        pane: TerminalPane,
+        backend: B,
+    ) -> io::Result<()> {
+        let id = pane.id.clone();
+        let handle = spawn_backend(backend)?;
+        self.inner.add_pane(pane);
+        self.panes.insert(
+            id,
+            Pane {
+                backend: handle,
+                ansi: AnsiHandler::new(),
+            },
+        );
+        Ok(())
+    }
+
     /// Add a pane backed by a local shell. Requires the `local` feature.
     #[cfg(feature = "local")]
     pub fn add_local_pane(
         &mut self,
         _id: impl Into<String>,
         _config: crate::backend::local::LocalShellConfig,
-    ) {
-        todo!("LiveMultiTerminal::add_local_pane — M1")
+    ) -> io::Result<()> {
+        todo!("LiveMultiTerminal::add_local_pane — M1 (LocalShell wiring)")
     }
 
     /// Add a pane backed by an SSH session. Requires the `ssh` feature.
@@ -74,8 +98,15 @@ impl LiveMultiTerminal {
         &mut self,
         _id: impl Into<String>,
         _config: crate::backend::ssh::SshConfig,
-    ) {
+    ) -> io::Result<()> {
         todo!("LiveMultiTerminal::add_ssh_pane — M2")
+    }
+
+    /// Read-only access to a pane's elegance-side state (host, user, cwd,
+    /// status, scrollback). Useful for tests and for host apps that want to
+    /// query rendered output without going through the `controls()` view.
+    pub fn pane(&self, id: &str) -> Option<&TerminalPane> {
+        self.inner.pane(id)
     }
 
     /// Restricted view of the underlying [`MultiTerminal`]. Exposes the
@@ -88,12 +119,97 @@ impl LiveMultiTerminal {
         }
     }
 
-    pub fn show(&mut self, _ui: &mut Ui) -> Response {
-        // M1: drain `inner.take_events()`, forward Command events as input
-        // bytes to the targeted backends; for each pane, drain BackendEvent
-        // from its handle, feed bytes through `ansi`, and push each emitted
-        // TerminalLine into `inner`. Then call `inner.show(ui)`.
-        todo!("LiveMultiTerminal::show — M1")
+    /// Drive the wiring: forward typed commands to backends, drain backend
+    /// events, and update the inner widget. Returns `true` if any output
+    /// bytes were processed (the caller can use this to request a
+    /// repaint).
+    ///
+    /// Called once per frame from [`Self::show`]. Exposed publicly for
+    /// tests that want to drive the pump without rendering.
+    pub fn pump(&mut self) -> bool {
+        // Forward Command events to backends. Each Command carries the
+        // ids of its broadcast targets; the elegance widget has already
+        // pushed a Command echo line into each target pane.
+        for event in self.inner.take_events() {
+            match event {
+                TerminalEvent::Command { targets, command } => {
+                    let bytes: Bytes = format!("{command}\n").into_bytes().into();
+                    for target in targets {
+                        if let Some(pane) = self.panes.get(&target) {
+                            // Drop on full; the M1 design accepts this and
+                            // future hardening adds an [input dropped] marker.
+                            let _ = pane.backend.try_send_input(bytes.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Drain backend events into the inner widget.
+        let mut any_bytes = false;
+        let inner = &mut self.inner;
+        for (id, pane) in self.panes.iter_mut() {
+            loop {
+                match pane.backend.try_recv() {
+                    Ok(BackendEvent::Bytes(bytes)) => {
+                        any_bytes = true;
+                        for line in pane.ansi.feed(&bytes) {
+                            inner.push_line(id, line);
+                        }
+                    }
+                    Ok(BackendEvent::StatusChanged(status)) => {
+                        inner.set_status(id, status_to_elegance(status));
+                    }
+                    Ok(BackendEvent::Lossy { dropped }) => {
+                        inner.push_line(
+                            id,
+                            TerminalLine::warn(format!("[{dropped} bytes dropped]")),
+                        );
+                    }
+                    Ok(BackendEvent::InputLost { dropped }) => {
+                        inner.push_line(
+                            id,
+                            TerminalLine::warn(format!("[input lost: {dropped} bytes]")),
+                        );
+                    }
+                    Ok(BackendEvent::Closed { reason }) => {
+                        inner.set_status(id, elegance::TerminalStatus::Offline);
+                        inner.push_line(id, TerminalLine::dim(describe_close(&reason)));
+                    }
+                    Err(_) => break, // Empty or Disconnected; nothing more this frame.
+                }
+            }
+        }
+
+        any_bytes
+    }
+
+    /// Render the widget. Drives [`Self::pump`] first to deliver any new
+    /// events arrived since the last frame, then asks egui for a repaint
+    /// if output was processed (so the next frame picks up further
+    /// streaming bytes promptly).
+    pub fn show(&mut self, ui: &mut Ui) -> Response {
+        if self.pump() {
+            ui.ctx().request_repaint();
+        }
+        self.inner.show(ui)
+    }
+}
+
+fn status_to_elegance(status: TerminalStatus) -> elegance::TerminalStatus {
+    match status {
+        TerminalStatus::Connected => elegance::TerminalStatus::Connected,
+        TerminalStatus::Reconnecting => elegance::TerminalStatus::Reconnecting,
+        TerminalStatus::Offline => elegance::TerminalStatus::Offline,
+    }
+}
+
+fn describe_close(reason: &CloseReason) -> String {
+    match reason {
+        CloseReason::Requested => "[session ended]".to_string(),
+        CloseReason::RemoteClosed => "[remote closed]".to_string(),
+        CloseReason::TransportError(e) => format!("[transport error: {e}]"),
+        CloseReason::AuthFailed(e) => format!("[auth failed: {e}]"),
     }
 }
 
@@ -102,7 +218,7 @@ pub struct LiveMultiTerminalControls<'a> {
     inner: &'a mut MultiTerminal,
 }
 
-impl<'a> LiveMultiTerminalControls<'a> {
+impl LiveMultiTerminalControls<'_> {
     pub fn toggle_broadcast(&mut self, id: &str) {
         self.inner.toggle_broadcast(id);
     }
@@ -141,5 +257,16 @@ impl<'a> LiveMultiTerminalControls<'a> {
 
     pub fn set_focused(&mut self, id: Option<String>) {
         self.inner.set_focused(id);
+    }
+
+    pub fn pane(&self, id: &str) -> Option<&TerminalPane> {
+        self.inner.pane(id)
+    }
+
+    /// Programmatically queue a command, as if the user typed it and
+    /// pressed Enter. Useful for automation; returns `true` if the
+    /// command was queued (i.e. at least one pane was a broadcast target).
+    pub fn send_command(&mut self, cmd: &str) -> bool {
+        self.inner.send_command(cmd)
     }
 }
