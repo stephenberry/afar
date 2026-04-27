@@ -1,4 +1,4 @@
-//! Integration tests for `LiveMultiTerminal::pump`.
+//! Integration tests for `MultiTerminal::pump`.
 //!
 //! Drives a `MockBackend`-backed pane through the full pipeline (spawn
 //! task → BackendEvent channels → ANSI handler → MultiTerminal scrollback)
@@ -7,14 +7,14 @@
 use std::time::{Duration, Instant};
 
 use afar::backend::mock::MockBackend;
-use afar::LiveMultiTerminal;
+use afar::MultiTerminal;
 use elegance::{LineKind, TerminalPane, TerminalStatus};
 
 /// Drive `pump()` in a polling loop until `condition` holds or we hit a
 /// 2-second deadline. The per-session task delivers events on the singleton
 /// runtime; the test thread sleeps briefly between pumps so the runtime
 /// gets cycles to produce them.
-fn pump_until(term: &mut LiveMultiTerminal, condition: impl Fn(&LiveMultiTerminal) -> bool) {
+fn pump_until(term: &mut MultiTerminal, condition: impl Fn(&MultiTerminal) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         term.pump();
@@ -29,7 +29,7 @@ fn pump_until(term: &mut LiveMultiTerminal, condition: impl Fn(&LiveMultiTermina
 #[test]
 fn bytes_flow_through_ansi_handler_into_pane_lines() {
     let mock = MockBackend::new(vec![b"\x1b[31merror: boom\n".to_vec()]);
-    let mut term = LiveMultiTerminal::new("test");
+    let mut term = MultiTerminal::new("test");
     term.add_pane(TerminalPane::new("p1", "host"), mock)
         .unwrap();
 
@@ -49,7 +49,7 @@ fn bytes_flow_through_ansi_handler_into_pane_lines() {
 #[test]
 fn closed_event_sets_status_offline_and_emits_dim_marker() {
     let mock = MockBackend::new(vec![b"hi\n".to_vec()]);
-    let mut term = LiveMultiTerminal::new("test");
+    let mut term = MultiTerminal::new("test");
     term.add_pane(TerminalPane::new("p2", "host"), mock)
         .unwrap();
 
@@ -71,7 +71,7 @@ fn closed_event_sets_status_offline_and_emits_dim_marker() {
 fn multiple_panes_are_drained_independently() {
     let mock_a = MockBackend::new(vec![b"alpha\n".to_vec()]);
     let mock_b = MockBackend::new(vec![b"beta\n".to_vec()]);
-    let mut term = LiveMultiTerminal::new("test");
+    let mut term = MultiTerminal::new("test");
     term.add_pane(TerminalPane::new("a", "host-a"), mock_a)
         .unwrap();
     term.add_pane(TerminalPane::new("b", "host-b"), mock_b)

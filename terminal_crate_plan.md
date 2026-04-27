@@ -23,7 +23,7 @@ The split also matches a real architectural seam: the existing `MultiTerminal` a
 
 ## 2. Scope
 
-The crate ships **one** widget: `LiveMultiTerminal`, a thin wrapper around elegance's existing `MultiTerminal` that owns one or more backends and pumps bytes between them and the line-buffered scrollback model the host widget already understands.
+The crate ships **one** widget: `MultiTerminal`, a thin wrapper around elegance's existing `MultiTerminal` that owns one or more backends and pumps bytes between them and the line-buffered scrollback model the host widget already understands.
 
 Goals:
 
@@ -41,11 +41,11 @@ Goals:
 - **Not a serial / telnet console.** Pluggable backend, but the shipped backends are local PTY and SSH only.
 - **Not a browser-native SSH client.** No russh-in-wasm. When the browser story is needed (v1.x), it follows the VS Code / Codespaces model: a `WebSocketBackend` in the browser pairs with a trusted server-side relay that owns the real `LocalShell` or `SshSession`. See §13 (Resolved) for the rationale.
 
-## 4. The widget: `LiveMultiTerminal`
+## 4. The widget: `MultiTerminal`
 
 Wraps elegance's existing `MultiTerminal`. The caller hands it a backend per pane; the wrapper drains `TerminalEvent::Command`, writes the command bytes to the backend, and pumps stdout/stderr lines back into `push_line`. ANSI colour codes (SGR) are matched and mapped onto `LineKind` (red → `Err`, green → `Ok`, yellow → `Warn`, blue/cyan → `Info`, default → `Out`); cursor-positioning escapes (`ED`, `CUP`, `EL`, alt-screen toggles, mouse modes, OSC titles, OSC 52 clipboard) are silently dropped. Anything that requires a 2D grid is discarded; the use case is text in, text out.
 
-`LiveMultiTerminal` exposes a `controls()` method that returns a restricted view (`LiveMultiTerminalControls<'_>`) delegating the safe `MultiTerminal` operations: broadcast/solo/collapse, focus, scrollback queries, pending-input edits. Structural mutators (`add_pane`, `remove_pane`) and direct pane writes (`push_line`, `send_command`) are deliberately *not* exposed: they would break the wrapper's invariant that every pane has a registered backend and every command flows through the input pump. New panes are added via typed builders on `LiveMultiTerminal` itself (`add_ssh_pane`, `add_local_pane`, etc.) so the backend registration and the elegance pane creation happen atomically.
+`MultiTerminal` exposes a `controls()` method that returns a restricted view (`MultiTerminalControls<'_>`) delegating the safe operations of the inner `elegance::MultiTerminal`: broadcast/solo/collapse, focus, scrollback queries, pending-input edits. Structural mutators (`add_pane`, `remove_pane`) and direct pane writes (`push_line`, `send_command`) are deliberately *not* exposed: they would break the wrapper's invariant that every pane has a registered backend and every command flows through the input pump. New panes are added via typed builders on `MultiTerminal` itself (`add_ssh_pane`, `add_local_pane`, etc.) so the backend registration and the elegance pane creation happen atomically.
 
 ## 5. Crate layout
 
@@ -62,7 +62,7 @@ afar/
 │   ├── runtime.rs          # tokio runtime owner, spawn helpers
 │   ├── bytes.rs            # ring buffer between backend and UI
 │   ├── ansi.rs             # SGR → LineKind matcher, CSI/OSC stripper
-│   └── live_multi.rs       # LiveMultiTerminal (wraps elegance)
+│   └── multi_terminal.rs   # MultiTerminal (wraps elegance::MultiTerminal)
 ├── examples/
 │   ├── local_shell.rs      # one-liner: spawn $SHELL into a single pane
 │   ├── ssh_session.rs      # connect to one host with key auth
@@ -81,7 +81,7 @@ afar/
 - `tracing` — emit spans for reconnects and auth attempts.
 - *(planned, v1.x)* `websocket` — gates a `WebSocketBackend` that connects the browser-side widget to a trusted server-side relay. Wasm-buildable; pairs with a relay process that owns the real `LocalShell` or `SshSession`. Follows the VS Code / Codespaces architecture.
 
-A user who wants only `LiveMultiTerminal` with their own backend can disable `local` and `ssh` and depend on the trait alone. That is also the configuration a wasm build will use today, with the `websocket` feature filling in the real backend once it ships.
+A user who wants only `MultiTerminal` with their own backend can disable `local` and `ssh` and depend on the trait alone. That is also the configuration a wasm build will use today, with the `websocket` feature filling in the real backend once it ships.
 
 ## 6. Backend trait
 
@@ -204,13 +204,13 @@ No attempt to track multiple concurrent channels in one session; callers needing
 
 A PTY is allocated by default so interactive prompts (`sudo`, ssh asking for a remote passphrase) and signal handling work. Callers who want strict one-shot exec semantics can use `SshConfig::no_pty()`, which switches to an `exec` channel.
 
-PTYs default to **echo on**, which collides with `MultiTerminal`'s existing behaviour of rendering the typed command as a `LineKind::Command` line: without intervention the user sees the command twice (once from elegance's local echo, once from the remote `bash` echoing it back). Resolution: on session establishment we send `stty -echo 2>/dev/null\n` as the first input. This works across `bash`, `zsh`, `dash`, `sh`, `fish`. PowerShell does not have `stty` and will double-echo; this is documented as a known limitation, with the recommendation to set the remote `$PSStyle.OutputRendering = 'Host'` and accept the duplication, or use `no_pty()` for one-shot Windows-host workflows.
+PTYs default to **echo on**, which collides with the inner `elegance::MultiTerminal`'s existing behaviour of rendering the typed command as a `LineKind::Command` line: without intervention the user sees the command twice (once from elegance's local echo, once from the remote `bash` echoing it back). Resolution: on session establishment we send `stty -echo 2>/dev/null\n` as the first input. This works across `bash`, `zsh`, `dash`, `sh`, `fish`. PowerShell does not have `stty` and will double-echo; this is documented as a known limitation, with the recommendation to set the remote `$PSStyle.OutputRendering = 'Host'` and accept the duplication, or use `no_pty()` for one-shot Windows-host workflows.
 
 ### 7.6 Reconnection
 
 On transport error, `SshSession` emits `StatusChanged(Reconnecting)` and retries with exponential backoff (1s, 2s, 4s, capped at 30s, max 5 attempts by default). Output bytes already buffered for the UI are preserved; new bytes after the reconnect appear below a `--- reconnected ---` divider line. After max attempts the status flips to `Offline` and the channel closes.
 
-Pending input is **dropped**, not replayed. Specifically: any bytes queued in the `BackendHandle` send channel and the local `pending` line buffer in `MultiTerminal` are discarded the moment `Reconnecting` is entered, and `BackendEvent::InputLost { dropped: N }` is emitted so the pane can render an `[input lost: N bytes]` marker. Replay would be unsafe: the user's mental model after a transport hiccup is "the command never went," so silently re-running it after reconnect could execute destructive commands twice. We make no claim about input that was *already* sent before the failure, since SSH does not provide per-byte ACKs; users should treat reconnect as a hard input boundary and re-issue commands deliberately.
+Pending input is **dropped**, not replayed. Specifically: any bytes queued in the `BackendHandle` send channel and the local `pending` line buffer in the inner widget are discarded the moment `Reconnecting` is entered, and `BackendEvent::InputLost { dropped: N }` is emitted so the pane can render an `[input lost: N bytes]` marker. Replay would be unsafe: the user's mental model after a transport hiccup is "the command never went," so silently re-running it after reconnect could execute destructive commands twice. We make no claim about input that was *already* sent before the failure, since SSH does not provide per-byte ACKs; users should treat reconnect as a hard input boundary and re-issue commands deliberately.
 
 ## 8. ANSI handling
 
@@ -229,7 +229,7 @@ We use `vte::Parser` for the byte-level state machine because getting CSI / OSC 
 
 The total `Performer` impl is roughly 100 to 150 lines. The hot path is `print`; everything else is rare.
 
-`LineKind::Command` is **not** emitted by the SGR mapper. `LiveMultiTerminal` synthesizes a `LineKind::Command` line itself when forwarding user input to the backend, so the typed prompt-and-command echo is rendered with elegance's prompt styling regardless of what the remote sends back. The mapping table above only governs *output* coming up from the backend.
+`LineKind::Command` is **not** emitted by the SGR mapper. `MultiTerminal` synthesizes a `LineKind::Command` line itself when forwarding user input to the backend, so the typed prompt-and-command echo is rendered with elegance's prompt styling regardless of what the remote sends back. The mapping table above only governs *output* coming up from the backend.
 
 ### 8.1 Mid-line SGR resolution
 
@@ -245,10 +245,10 @@ A future direction is per-span styling, where `TerminalLine` becomes a `Vec<Span
 
 ### 8.2 Backpressure and rate limits
 
-- **Per-line cap (default 64 KiB):** force-split lines longer than this so a single hostile or runaway log entry can't OOM the pane. The 64 KiB floor accommodates `cargo expand` output, single-line JSON payloads, base64 blobs, pip resolution traces, and minified bundles. Configurable per `LiveMultiTerminal`.
+- **Per-line cap (default 64 KiB):** force-split lines longer than this so a single hostile or runaway log entry can't OOM the pane. The 64 KiB floor accommodates `cargo expand` output, single-line JSON payloads, base64 blobs, pip resolution traces, and minified bundles. Configurable per `MultiTerminal`.
 - **Per-frame byte cap (default 256 KiB):** if more than this arrives between repaints, process the cap and defer the rest to the next frame. Prevents a flooded shell from blocking the UI thread.
-- **Backend ring-buffer overflow: drop *newest*, not oldest.** When the per-pane byte ring fills (default 1 MiB) the bytes that arrive *after* the cap is hit are dropped, and a single `[N bytes dropped]` marker is rendered at the truncation point. Drop-newest is the right default for build/log streams: the head of the buffer holds the first error or stack trace, which is exactly what the user is scrolled up to find. Drop-oldest erases that. Live-tail scenarios (`tail -f /var/log/...` where only the freshest output matters) can opt in via `LiveMultiTerminal::overflow_policy(OverflowPolicy::DropOldest)`.
-- **Per-pane scrollback cap:** delegated to `MultiTerminal::scrollback_cap`. Drop-oldest is correct here because the scrollback is a fixed window of history, not transient flood mitigation; old lines age out as new ones arrive.
+- **Backend ring-buffer overflow: drop *newest*, not oldest.** When the per-pane byte ring fills (default 1 MiB) the bytes that arrive *after* the cap is hit are dropped, and a single `[N bytes dropped]` marker is rendered at the truncation point. Drop-newest is the right default for build/log streams: the head of the buffer holds the first error or stack trace, which is exactly what the user is scrolled up to find. Drop-oldest erases that. Live-tail scenarios (`tail -f /var/log/...` where only the freshest output matters) can opt in via `MultiTerminal::overflow_policy(OverflowPolicy::DropOldest)`.
+- **Per-pane scrollback cap:** delegated to `elegance::MultiTerminal::scrollback_cap`. Drop-oldest is correct here because the scrollback is a fixed window of history, not transient flood mitigation; old lines age out as new ones arrive.
 
 ## 9. Threading model
 
@@ -262,8 +262,7 @@ A future direction is per-span styling, where `TerminalLine` becomes a `Vec<Span
        ▼                                   ▼
    network / OS                     ┌─────────────────────┐
                                     │ egui UI thread      │
-                                    │ LiveMultiTerminal   │
-                                    │   ::show            │
+                                    │ MultiTerminal::show │
                                     └─────────────────────┘
 ```
 
@@ -275,7 +274,7 @@ The crate owns a process-singleton multi-thread tokio runtime, behind a `Mutex<W
 - Subsequent backend spawns find the `Weak` still upgradable and clone the existing `Arc`. All live backends share one runtime.
 - When the last `BackendHandle` is dropped, the `Arc` count goes to zero, the `Weak` becomes invalid, and the runtime shuts down (worker threads exit, the `Runtime` is destroyed). A subsequent backend spawn re-initialises a new runtime cleanly.
 
-This handles the realistic patterns explicitly: two `LiveMultiTerminal`s in the same process share the runtime; an app that creates and tears down a `LiveMultiTerminal` repeatedly does not leak threads; a long-idle app pays no runtime cost while no sessions are open.
+This handles the realistic patterns explicitly: two `MultiTerminal`s in the same process share the runtime; an app that creates and tears down a `MultiTerminal` repeatedly does not leak threads; a long-idle app pays no runtime cost while no sessions are open.
 
 If the host app already runs tokio, `with_runtime(handle)` accepts an external `tokio::runtime::Handle` and skips the singleton entirely; the host owns the lifecycle. We deliberately keep the lazy path: forcing every caller to wire up a `Runtime` themselves is friction for simple apps that don't otherwise touch tokio.
 
@@ -286,16 +285,16 @@ Channels are bounded (`mpsc::channel(64)` for events, ring-buffered `BytesMut` f
 ## 10. Public API sketch
 
 ```rust
-use afar::{LiveMultiTerminal, SshAuth, SshConfig};
+use afar::{MultiTerminal, SshAuth, SshConfig};
 
 // Single-host SSH session as one pane.
 struct App {
-    term: LiveMultiTerminal,
+    term: MultiTerminal,
 }
 
 impl App {
     fn new() -> Self {
-        let mut term = LiveMultiTerminal::new("ssh");
+        let mut term = MultiTerminal::new("ssh");
         term.add_ssh_pane("edge-01", SshConfig {
             host: "edge-01.internal".into(),
             user: "root".into(),
@@ -314,12 +313,12 @@ impl App {
 ```rust
 // Fleet view, broadcasting commands across many hosts.
 struct Fleet {
-    terms: LiveMultiTerminal,
+    terms: MultiTerminal,
 }
 
 impl Fleet {
     fn new(hosts: &[&str]) -> Self {
-        let mut terms = LiveMultiTerminal::new("fleet");
+        let mut terms = MultiTerminal::new("fleet");
         for h in hosts {
             terms.add_ssh_pane(h, SshConfig::for_host(h, "root"));
         }
@@ -332,7 +331,7 @@ impl Fleet {
 }
 ```
 
-`LiveMultiTerminal` exposes a `controls()` accessor returning `LiveMultiTerminalControls<'_>` for the safe operations (broadcast/solo/collapse, focus, scrollback queries). Structural mutation is reserved to typed builders on `LiveMultiTerminal` itself; see §4 for the rationale.
+`MultiTerminal` exposes a `controls()` accessor returning `MultiTerminalControls<'_>` for the safe operations (broadcast/solo/collapse, focus, scrollback queries). Structural mutation is reserved to typed builders on `MultiTerminal` itself; see §4 for the rationale.
 
 ## 11. Testing strategy
 
@@ -356,7 +355,7 @@ impl Fleet {
 | Milestone | Scope | Rough size |
 |---|---|---|
 | **M0** | Crate scaffolding, `TerminalBackend` trait (over `tokio::io`), `MockBackend`, `BackendHandle`, singleton runtime with `Weak`-based lifecycle. No widget yet. | ~1 week |
-| **M1** | `LiveMultiTerminal` over `LocalShell`. ANSI handler (SGR → `LineKind` with first-non-default rule, CSI/OSC stripper), 64 KiB per-line cap, drop-newest ring with markers, `LiveMultiTerminalControls` view, examples. | ~1.5 weeks |
+| **M1** | `MultiTerminal` over `LocalShell`. ANSI handler (SGR → `LineKind` with first-non-default rule, CSI/OSC stripper), 64 KiB per-line cap, drop-newest ring with markers, `MultiTerminalControls` view, examples. | ~1.5 weeks |
 | **M2** | `SshSession`: agent auth, strict known_hosts, TOFU, keepalive, signals (Ctrl-C, Ctrl-D), `pty-req` with `stty -echo` handshake, `window-change` on resize, reconnect with input-drop and `[input lost]` marker. | ~3 weeks |
 | **M2.5** | Host-key edge cases (hashed entries, `@cert-authority`, IPv6 brackets, multiple keys, wildcards) and the `MismatchCallback` plumbing. Real-sshd integration tests. | ~1 week |
 | **M3** | Hardening: rate-limit fuzzing, ANSI matcher fuzzing with `cargo-fuzz`, docs polish, cargo-deny audit, semver-1.0. | ~1 week |
@@ -367,10 +366,10 @@ Roughly 7 to 8 weeks of focused work for a v1 that fans out commands across SSH 
 
 The decisions below shaped the scope above; each entry records *what* was chosen and *why*, so future contributors don't have to re-derive the reasoning.
 
-- **No cell-grid emulation. Line mode only.** v1 ships only `LiveMultiTerminal`; there is no full-screen `Terminal` widget. `vim`, `htop`, `less`, `tmux` and other TUIs are out of scope and will not be supported by this crate. Reasoning: cell-grid emulation (vte `Performer`, alt-screen, scrollback grid, cursor positioning, mouse, selection, key encoding, palette mapping, resize re-flow) is roughly 80% of the implementation work for marginal additional value to the realistic users of this crate (ops dashboards, fleet automation, build/log streaming, agent-driven shells). A user who wants `vim` over SSH already has a real terminal emulator on their machine; running one inside an egui app is a niche we deliberately don't serve. The library-extraction rule reinforces this: there's no second use case to justify generalising. Side benefits: simpler dep tree, no parser conformance burden, no clipboard-OSC attack vector, ship in 5 to 6 weeks instead of 11.
+- **No cell-grid emulation. Line mode only.** v1 ships only `MultiTerminal`; there is no full-screen `Terminal` widget. `vim`, `htop`, `less`, `tmux` and other TUIs are out of scope and will not be supported by this crate. Reasoning: cell-grid emulation (vte `Performer`, alt-screen, scrollback grid, cursor positioning, mouse, selection, key encoding, palette mapping, resize re-flow) is roughly 80% of the implementation work for marginal additional value to the realistic users of this crate (ops dashboards, fleet automation, build/log streaming, agent-driven shells). A user who wants `vim` over SSH already has a real terminal emulator on their machine; running one inside an egui app is a niche we deliberately don't serve. The library-extraction rule reinforces this: there's no second use case to justify generalising. Side benefits: simpler dep tree, no parser conformance burden, no clipboard-OSC attack vector, ship in 5 to 6 weeks instead of 11.
 - **Async runtime: tokio-only.** `russh` and `portable-pty`'s async story both target tokio; abstracting over smol/async-std would double the surface for no real user benefit. The crate's `with_runtime(handle)` escape hatch (§9) lets a host app that already runs tokio share its runtime, which covers the realistic concern. Hosts on a non-tokio runtime can still drive a `TerminalBackend` impl of their own.
-- **`MultiTerminal` stays in `egui-elegance`.** Not relocated to this crate. It is already shipped in 0.4.0 and useful purely as a presentational widget for mockups, design demos, and line-buffered apps that have no business pulling tokio/russh into their dependency tree. The seam between the two crates (`TerminalEvent::Command` out, `push_line` in) has been stable across four releases, so the predicted co-evolution churn is mostly hypothetical. The companion crate's `LiveMultiTerminal` wraps `elegance::MultiTerminal` and exposes `inner()` / `inner_mut()` for callers that want the existing broadcast/solo/collapse controls.
+- **elegance's `MultiTerminal` stays in `egui-elegance`.** Not relocated to this crate. It is already shipped in 0.4.0 and useful purely as a presentational widget for mockups, design demos, and line-buffered apps that have no business pulling tokio/russh into their dependency tree. The seam between the two crates (`TerminalEvent::Command` out, `push_line` in) has been stable across four releases, so the predicted co-evolution churn is mostly hypothetical. The companion crate's `MultiTerminal` wraps `elegance::MultiTerminal` and exposes `inner()` / `inner_mut()` for callers that want the existing broadcast/solo/collapse controls.
 - **One crate, not split.** Cargo features (`local`, `ssh`, `serde`, `tracing`, `ssh-openssl`, `ssh-password`) cover the realistic axes of conditional compilation. Splitting into `-core` + `-ssh` + `-local` triples the release surface (three crate versions to coordinate, three changelogs, three sets of dep advisories) for negligible benefit unless compile time on a `default-features = false` build becomes a measured problem. Revisit only if a real user reports it.
-- **`LiveMultiTerminal` stays in the companion crate.** Not upstreamed into `egui-elegance`. The hidden cost of upstreaming isn't async deps directly (the backend trait can be runtime-agnostic with `crossbeam-channel` or `std::sync::mpsc`); it's that elegance would gain a `TerminalBackend` trait as **public API**, expanding its brand from "presentational widgets" into "presentational widgets + I/O abstraction." That's a one-way door, and every future shape change to the trait (resize semantics, status variants, byte-loss signaling) would become a coordinated version bump of both crates instead of an internal change in the companion. The library-extraction rule also bites: `LiveMultiTerminal` has exactly one consumer (this crate), which fails the 2+ use cases bar. Concrete revisit trigger: a *third* crate wants to ship its own `MultiTerminal` backend without depending on the SSH/PTY tree.
+- **`afar::MultiTerminal` stays in the companion crate.** Not upstreamed into `egui-elegance`. The hidden cost of upstreaming isn't async deps directly (the backend trait can be runtime-agnostic with `crossbeam-channel` or `std::sync::mpsc`); it's that elegance would gain a `TerminalBackend` trait as **public API**, expanding its brand from "presentational widgets" into "presentational widgets + I/O abstraction." That's a one-way door, and every future shape change to the trait (resize semantics, status variants, byte-loss signaling) would become a coordinated version bump of both crates instead of an internal change in the companion. The library-extraction rule also bites: `MultiTerminal` has exactly one consumer (this crate), which fails the 2+ use cases bar. Concrete revisit trigger: a *third* crate wants to ship its own `MultiTerminal` backend without depending on the SSH/PTY tree.
 - **No scrollback persistence in v1.** No auto-save of pane scrollback across app restarts. Terminal scrollback routinely contains secrets (passwords typed under broken echo, API keys, sudo prompts, agent socket paths), and auto-persisting that to disk crosses a line that **no** production terminal (Terminal.app, iTerm2, Alacritty, kitty, Windows Terminal) crosses by default. That industry-wide consensus is the strongest possible signal that this is the right default. The `serde` feature derives `Serialize` / `Deserialize` on `SshConfig` so callers can persist their connection list; persisting scrollback is a host-app concern that requires explicit user consent, and we don't ship it in the widget. Trigger to revisit: multiple adopters report a concrete use case the bare serde derives don't cover, *and* propose a UX for distinguishing live sessions from restored snapshots so users aren't fooled by stale output that looks live.
-- **Browser support: VS Code architecture, deferred to v1.x.** Native-only for v1.0. When the browser story is needed, the answer is a `WebSocketBackend`: the browser runs `LiveMultiTerminal` and a thin WebSocket reader, while a trusted server-side relay owns the real `LocalShell` or `SshSession`. This is the architecture VS Code, GitHub Codespaces, github.dev, vscode.dev, and most web-SSH products converged on. Browser-side russh-in-wasm is not on the roadmap; it remains a niche security experiment and ships nowhere mainstream. The `TerminalBackend` trait (§6) already accommodates `WebSocketBackend` without disrupting any existing impl, so v1.x can add it as a non-breaking feature gate (`websocket`) when a real egui-on-wasm adopter shows up.
+- **Browser support: VS Code architecture, deferred to v1.x.** Native-only for v1.0. When the browser story is needed, the answer is a `WebSocketBackend`: the browser runs `MultiTerminal` and a thin WebSocket reader, while a trusted server-side relay owns the real `LocalShell` or `SshSession`. This is the architecture VS Code, GitHub Codespaces, github.dev, vscode.dev, and most web-SSH products converged on. Browser-side russh-in-wasm is not on the roadmap; it remains a niche security experiment and ships nowhere mainstream. The `TerminalBackend` trait (§6) already accommodates `WebSocketBackend` without disrupting any existing impl, so v1.x can add it as a non-breaking feature gate (`websocket`) when a real egui-on-wasm adopter shows up.

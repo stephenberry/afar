@@ -1,9 +1,12 @@
-//! `LiveMultiTerminal` — wraps elegance's `MultiTerminal` with backends.
+//! `MultiTerminal` — wraps elegance's `MultiTerminal` with backends.
 //!
 //! See §4 of `terminal_crate_plan.md`. The widget owns one backend per
-//! pane, drains `TerminalEvent::Command` from the inner `MultiTerminal`,
+//! pane, drains `TerminalEvent::Command` from the inner elegance widget,
 //! writes typed bytes to the backend, and pumps stdout/stderr lines back
 //! into `push_line` via the [`crate::ansi::AnsiHandler`].
+//!
+//! When both crates are imported, alias one to keep them straight, e.g.
+//! `use elegance::MultiTerminal as ElegMultiTerminal;`.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -11,7 +14,7 @@ use std::io;
 
 use bytes::Bytes;
 use egui::{Response, Ui};
-use elegance::{MultiTerminal, TerminalEvent, TerminalLine, TerminalPane};
+use elegance::{TerminalEvent, TerminalLine, TerminalPane};
 
 use crate::ansi::AnsiHandler;
 use crate::backend::{
@@ -37,20 +40,21 @@ struct Pane {
     ansi: AnsiHandler,
 }
 
-/// Multi-pane terminal widget driven by real backends.
+/// Multi-pane terminal widget driven by real backends. Wraps
+/// [`elegance::MultiTerminal`] and owns one [`BackendHandle`] per pane.
 ///
 /// See `terminal_crate_plan.md` §4.
 #[allow(dead_code)] // `overflow` is wired up in the spawn-loop hardening pass.
-pub struct LiveMultiTerminal {
-    inner: MultiTerminal,
+pub struct MultiTerminal {
+    inner: elegance::MultiTerminal,
     panes: HashMap<String, Pane>,
     overflow: OverflowPolicy,
 }
 
-impl LiveMultiTerminal {
+impl MultiTerminal {
     pub fn new(id_salt: impl Hash) -> Self {
         Self {
-            inner: MultiTerminal::new(id_salt),
+            inner: elegance::MultiTerminal::new(id_salt),
             panes: HashMap::new(),
             overflow: OverflowPolicy::default(),
         }
@@ -89,7 +93,7 @@ impl LiveMultiTerminal {
         _id: impl Into<String>,
         _config: crate::backend::local::LocalShellConfig,
     ) -> io::Result<()> {
-        todo!("LiveMultiTerminal::add_local_pane — M1 (LocalShell wiring)")
+        todo!("MultiTerminal::add_local_pane — M1 (LocalShell wiring)")
     }
 
     /// Add a pane backed by an SSH session. Requires the `ssh` feature.
@@ -99,7 +103,7 @@ impl LiveMultiTerminal {
         _id: impl Into<String>,
         _config: crate::backend::ssh::SshConfig,
     ) -> io::Result<()> {
-        todo!("LiveMultiTerminal::add_ssh_pane — M2")
+        todo!("MultiTerminal::add_ssh_pane — M2")
     }
 
     /// Read-only access to a pane's elegance-side state (host, user, cwd,
@@ -109,12 +113,13 @@ impl LiveMultiTerminal {
         self.inner.pane(id)
     }
 
-    /// Restricted view of the underlying [`MultiTerminal`]. Exposes the
-    /// safe operations (broadcast, solo, collapse, focus, scrollback
-    /// queries); structural mutators are deliberately not reachable so
-    /// the wrapper invariant ("every pane has a backend") holds.
-    pub fn controls(&mut self) -> LiveMultiTerminalControls<'_> {
-        LiveMultiTerminalControls {
+    /// Restricted view of the underlying [`elegance::MultiTerminal`].
+    /// Exposes the safe operations (broadcast, solo, collapse, focus,
+    /// scrollback queries); structural mutators are deliberately not
+    /// reachable so the wrapper invariant ("every pane has a backend")
+    /// holds.
+    pub fn controls(&mut self) -> MultiTerminalControls<'_> {
+        MultiTerminalControls {
             inner: &mut self.inner,
         }
     }
@@ -213,12 +218,13 @@ fn describe_close(reason: &CloseReason) -> String {
     }
 }
 
-/// Restricted view of the inner [`MultiTerminal`]. See §4 of the plan.
-pub struct LiveMultiTerminalControls<'a> {
-    inner: &'a mut MultiTerminal,
+/// Restricted view of the inner [`elegance::MultiTerminal`]. See §4 of
+/// the plan.
+pub struct MultiTerminalControls<'a> {
+    inner: &'a mut elegance::MultiTerminal,
 }
 
-impl LiveMultiTerminalControls<'_> {
+impl MultiTerminalControls<'_> {
     pub fn toggle_broadcast(&mut self, id: &str) {
         self.inner.toggle_broadcast(id);
     }
