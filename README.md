@@ -1,12 +1,10 @@
 # afar
 
+> **Status: pre-implementation, not usable yet.** The crate is scaffolded but the backends, ANSI handler, and widget pump are stubs that `todo!()` on call. Don't depend on `afar` in production code. The full design is in [`terminal_crate_plan.md`](./terminal_crate_plan.md); track progress against the milestone table in §13.
+
 Operate shells from afar: line-mode terminal panes over local PTY or SSH for [egui](https://github.com/emilk/egui), rendered through [`egui-elegance`](https://github.com/stephenberry/egui-elegance)'s `MultiTerminal`.
 
 `afar` is the working-backend companion to elegance's presentational `MultiTerminal` widget. You get a multi-pane terminal that fans out commands to many SSH hosts at once, streams output back, renders it in elegance's design language, and never pulls heavy deps into apps that just want the widget chrome.
-
-## Status
-
-Pre-implementation. The full design is in [`terminal_crate_plan.md`](./terminal_crate_plan.md); the source tree is scaffolded but the backends, ANSI handler, and widget pump are not yet wired up. See the milestone table in §13 of the plan.
 
 ## Scope
 
