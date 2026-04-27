@@ -21,16 +21,11 @@ use crate::backend::BackendHandle;
 /// `[N bytes dropped]` marker is rendered at the truncation point. This
 /// preserves the head of the buffer (where build/log streams keep their
 /// first error). Switch to `DropOldest` for live-tail scenarios.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OverflowPolicy {
+    #[default]
     DropNewest,
     DropOldest,
-}
-
-impl Default for OverflowPolicy {
-    fn default() -> Self {
-        Self::DropNewest
-    }
 }
 
 #[allow(dead_code)]
@@ -42,6 +37,7 @@ struct Pane {
 /// Multi-pane terminal widget driven by real backends.
 ///
 /// See `terminal_crate_plan.md` §4.
+#[allow(dead_code)] // `panes` and `overflow` are wired up in M1.
 pub struct LiveMultiTerminal {
     inner: MultiTerminal,
     panes: HashMap<String, Pane>,
@@ -74,7 +70,11 @@ impl LiveMultiTerminal {
 
     /// Add a pane backed by an SSH session. Requires the `ssh` feature.
     #[cfg(feature = "ssh")]
-    pub fn add_ssh_pane(&mut self, _id: impl Into<String>, _config: crate::backend::ssh::SshConfig) {
+    pub fn add_ssh_pane(
+        &mut self,
+        _id: impl Into<String>,
+        _config: crate::backend::ssh::SshConfig,
+    ) {
         todo!("LiveMultiTerminal::add_ssh_pane — M2")
     }
 
@@ -83,7 +83,9 @@ impl LiveMultiTerminal {
     /// queries); structural mutators are deliberately not reachable so
     /// the wrapper invariant ("every pane has a backend") holds.
     pub fn controls(&mut self) -> LiveMultiTerminalControls<'_> {
-        LiveMultiTerminalControls { inner: &mut self.inner }
+        LiveMultiTerminalControls {
+            inner: &mut self.inner,
+        }
     }
 
     pub fn show(&mut self, _ui: &mut Ui) -> Response {

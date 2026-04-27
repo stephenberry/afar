@@ -81,6 +81,7 @@ pub enum BackendEvent {
 }
 
 /// Message flowing from the UI to the runtime task.
+#[allow(dead_code)] // Fields read by the per-session task in M0.
 pub(crate) enum UiToBackend {
     Input(Bytes),
     Resize { cols: u16, rows: u16 },
@@ -90,6 +91,7 @@ pub(crate) enum UiToBackend {
 /// UI-facing facade for a backend session.
 ///
 /// `Send + Sync` and cheap to clone.
+#[allow(dead_code)] // `rx` is drained by `LiveMultiTerminal::show` in M1.
 pub struct BackendHandle {
     pub(crate) tx: mpsc::Sender<UiToBackend>,
     pub(crate) rx: mpsc::Receiver<BackendEvent>,

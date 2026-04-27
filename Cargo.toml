@@ -2,7 +2,7 @@
 name = "afar"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.92"
 authors = ["Stephen Berry"]
 description = "Operate shells from afar: line-mode terminal panes over local PTY or SSH for egui, rendered through egui-elegance's MultiTerminal."
 license = "MIT OR Apache-2.0"

@@ -65,8 +65,7 @@ pub enum Decision {
 }
 
 /// Callback the host app provides to handle a host-key mismatch.
-pub type MismatchCallback =
-    Arc<dyn Fn(HostKeyMismatch) -> Decision + Send + Sync + 'static>;
+pub type MismatchCallback = Arc<dyn Fn(HostKeyMismatch) -> Decision + Send + Sync + 'static>;
 
 /// SSH session configuration.
 #[derive(Clone)]

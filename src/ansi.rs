@@ -16,6 +16,7 @@ pub const DEFAULT_LINE_CAP: usize = 64 * 1024;
 
 /// Stateful line-mode handler that consumes backend bytes and emits
 /// `TerminalLine`s for the host pane's scrollback.
+#[allow(dead_code)] // `parser` drives the state machine in M1.
 pub struct AnsiHandler {
     line_cap: usize,
     parser: vte::Parser,
@@ -23,6 +24,7 @@ pub struct AnsiHandler {
 }
 
 #[derive(Default)]
+#[allow(dead_code)] // `out` is the M1 sink for `vte::Perform` callbacks.
 struct PerformerState {
     buffer: String,
     /// First non-default `LineKind` seen on the line. `None` means "no
