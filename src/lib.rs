@@ -16,7 +16,11 @@ pub mod runtime;
 
 mod live_multi;
 
-pub use backend::{BackendEvent, BackendHandle, CloseReason, TerminalBackend, TerminalStatus};
+pub use bytes::Bytes;
+
+pub use backend::{
+    spawn_backend, BackendEvent, BackendHandle, CloseReason, TerminalBackend, TerminalStatus,
+};
 pub use live_multi::{LiveMultiTerminal, LiveMultiTerminalControls, OverflowPolicy};
 
 #[cfg(feature = "local")]
