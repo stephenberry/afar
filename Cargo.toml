@@ -1,0 +1,58 @@
+[package]
+name = "afar"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Stephen Berry"]
+description = "Operate shells from afar: line-mode terminal panes over local PTY or SSH for egui, rendered through egui-elegance's MultiTerminal."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/stephenberry/afar"
+readme = "README.md"
+keywords = ["egui", "terminal", "ssh", "pty", "elegance"]
+categories = ["gui", "command-line-interface", "network-programming"]
+exclude = ["dev/", "tests/snapshots/"]
+
+[lib]
+name = "afar"
+path = "src/lib.rs"
+
+[features]
+default = ["local", "ssh"]
+local = ["dep:portable-pty"]
+ssh = ["dep:russh"]
+ssh-openssl = ["russh?/openssl"]
+ssh-password = []
+ssh-insecure = []
+serde = ["dep:serde"]
+tracing = ["dep:tracing"]
+
+[dependencies]
+egui = "0.34"
+egui-elegance = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-util", "macros", "net", "time"] }
+bytes = "1"
+vte = "0.13"
+
+portable-pty = { version = "0.8", optional = true }
+russh = { version = "0.45", optional = true, default-features = false, features = ["flate2"] }
+serde = { version = "1", optional = true, features = ["derive"] }
+tracing = { version = "0.1", optional = true }
+
+[dev-dependencies]
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-util", "macros", "test-util"] }
+
+[[example]]
+name = "local_shell"
+path = "examples/local_shell.rs"
+required-features = ["local"]
+
+[[example]]
+name = "ssh_session"
+path = "examples/ssh_session.rs"
+required-features = ["ssh"]
+
+[[example]]
+name = "fleet"
+path = "examples/fleet.rs"
+required-features = ["ssh"]
